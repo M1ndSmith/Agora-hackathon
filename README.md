@@ -66,8 +66,8 @@ LangGraph Orchestrator
 ### 1. Clone and install
 
 ```bash
-git clone https://github.com/yourname/agora-hackathon
-cd agora-hackathon
+git clone https://github.com/M1ndSmith/Agora-hackathon
+cd Agora-hackathon
 pip install -r requirements.txt
 ```
 
