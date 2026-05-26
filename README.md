@@ -4,7 +4,6 @@
 
 A three-stage AI agent that scans Polymarket prediction markets, estimates true event probabilities using LLM reasoning over live news and market history, applies statistical sanity gates to filter false signals, and logs confirmed picks with onchain proof via the Arc testnet. Reasoning traces are gated behind x402 micro-payments.
 
-**The agent's reasoning trace is the product** — not just a number, but a legible, auditable chain of thought for every pick, with cryptographic proof of when it was made.
 
 ---
 
