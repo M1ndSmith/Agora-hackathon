@@ -45,3 +45,19 @@ Thumbs.db
 
 # Logs
 *.log
+
+# Test / coverage
+.coverage
+.coverage.*
+htmlcov/
+coverage.xml
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.tox/
+.nox/
+
+# Local notes / editor scratch
+.aider*
+*.bak
+*.tmp

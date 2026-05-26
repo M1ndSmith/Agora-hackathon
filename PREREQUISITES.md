@@ -169,6 +169,19 @@ ARC_RPC=https://rpc.testnet.arc-node.thecanteenapp.com/v1/YOUR_KEY
 AGENT_ADDRESS=0x...
 AGENT_PRIVATE_KEY=0x...
 
+# ── Tier 2 intelligence (defaults — usually no change) ───
+CLOB_ENABLED=true
+DOMAIN_ROUTING_ENABLED=true
+ENSEMBLE_ENABLED=false
+RECENCY_DECAY_DAYS=30
+
+# ── Tier 3 execution dry-run (defaults — no real CLOB orders) ─
+EXECUTION_DRY_RUN=true
+FALLBACK_BANKROLL=100
+MAX_POSITION_FRACTION=0.10
+MAX_TOTAL_EXPOSURE_FRACTION=0.35
+MAX_THEME_EXPOSURE_FRACTION=0.20
+
 # ── Defaults (no change needed) ───────────────────────────
 MIN_EV_THRESHOLD=0.05
 MIN_VOLUME=10000
@@ -200,7 +213,12 @@ streamlit run app.py
 
 # OR use the CLI
 python main.py scan
+python main.py resolve    # update resolved outcomes in SQLite
+python main.py metrics    # P&L, Brier, calibration summary
+python main.py portfolio  # latest sizing + risk summary (after a scan)
 ```
+
+Copy the full variable list from [.env.example](.env.example) — it includes Tier 2 and Tier 3 flags with comments.
 
 ---
 
@@ -212,3 +230,6 @@ python main.py scan
 - Run `python main.py init` — generates wallet, writes to `.env`
 - Fund wallet from Circle faucet (testnet USDC)
 - *(Optional)* Circle setup — run `python main.py circle-init` (see `onchain/circle_setup/README.md`)
+- *(Optional)* Tier 2 — set `ENSEMBLE_ENABLED=true` only if you have multiple LLM API keys (slower scans)
+- Tier 3 runs in dry-run by default (`EXECUTION_DRY_RUN=true`) — no Polymarket trading keys required
+

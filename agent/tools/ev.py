@@ -71,6 +71,46 @@ def kelly_fraction(
     return max(0.0, kelly * bankroll * fraction)
 
 
+def kelly_fraction_two_sided(
+    market_prob: float,
+    ai_prob: float,
+    bankroll: float,
+    fraction: float = 0.25,
+) -> float:
+    """
+    Quarter-Kelly that sizes whichever side has the edge.
+
+    If ai_prob >= market_prob, sizes the YES bet.
+    If ai_prob < market_prob, sizes the NO bet using mirrored probabilities.
+    """
+    if ai_prob >= market_prob:
+        return kelly_fraction(market_prob, ai_prob, bankroll, fraction=fraction)
+    no_market = max(0.001, min(0.999, 1.0 - market_prob))
+    no_ai = max(0.0, min(1.0, 1.0 - ai_prob))
+    return kelly_fraction(no_market, no_ai, bankroll, fraction=fraction)
+
+
+def slippage_aware_kelly(
+    market_prob: float,
+    ai_prob: float,
+    bankroll: float,
+    available_depth: float = 0.0,
+    depth_fraction: float = 0.25,
+    fraction: float = 0.25,
+) -> float:
+    """
+    Quarter-Kelly capped by usable CLOB depth.
+
+    Side-aware: sizes the NO bet when the edge is on the NO side.
+    If depth is unknown (0), returns standard kelly_fraction for that side.
+    """
+    base = kelly_fraction_two_sided(market_prob, ai_prob, bankroll, fraction=fraction)
+    if available_depth <= 0:
+        return base
+    depth_cap = available_depth * depth_fraction
+    return round(min(base, depth_cap), 4)
+
+
 def confidence_level(ev: float, ai_prob: float, market_prob: float) -> str:
     """
     Classify confidence as low / medium / high based on edge size and probability distance.

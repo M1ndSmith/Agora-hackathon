@@ -64,6 +64,37 @@ class Settings(BaseSettings):
     circle_wallet_set_id: Optional[str] = None
     circle_wallet_id: Optional[str] = None
 
+    # Tier 2 — source credibility
+    recency_decay_days: int = 30
+
+    # Tier 2 — Polymarket CLOB microstructure
+    clob_enabled: bool = True
+    clob_base_url: str = "https://clob.polymarket.com"
+
+    # Tier 2 — LLM ensemble (off by default for latency)
+    ensemble_enabled: bool = False
+    ensemble_disagreement_threshold: float = 0.15
+
+    # Tier 2 — domain-specific estimation prompts
+    domain_routing_enabled: bool = True
+
+    # Tier 2 — social sentiment (stub until API wired)
+    social_enabled: bool = False
+    twitter_bearer_token: Optional[str] = None
+
+    # Tier 3 — execution (dry-run only; no real CLOB submission)
+    execution_dry_run: bool = True
+    fallback_bankroll: float = 100.0
+    max_position_fraction: float = 0.10
+    max_total_exposure_fraction: float = 0.35
+    max_theme_exposure_fraction: float = 0.20
+    drawdown_pause_threshold: float = -0.10
+    hedge_move_threshold: float = 0.12
+    early_close_profit_threshold: float = 0.20
+    early_close_loss_threshold: float = -0.15
+    slippage_depth_fraction: float = 0.25
+    arbitrage_min_divergence: float = 0.08
+
     # Feature flags
     arc_enabled: bool = True
 

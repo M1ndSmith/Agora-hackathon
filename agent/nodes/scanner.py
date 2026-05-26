@@ -19,6 +19,7 @@ from agent.tools.ev import calculate_ev, confidence_level
 from agent.tools.polymarket import fetch_markets
 from agent.tools.search import search_compact
 from config import get_llm, get_settings
+from models import ScannerCandidate, ScannerCandidates
 
 logger = logging.getLogger(__name__)
 
@@ -32,17 +33,13 @@ You receive a list of binary YES/NO markets with current prices and recent web c
 For each market, estimate the TRUE probability of YES using your knowledge and the context.
 Flag markets where |EV| = |(your_prob - market_prob) / market_prob| > {min_ev}.
 
-OUTPUT FORMAT — strictly a JSON array, nothing else. No prose, no markdown fences.
-[
-  {{"market_id": "...", "question": "...", "market_prob": 0.XX, "ai_prob": 0.XX}}
-]
-
-If nothing qualifies, output: []
+Return a structured list of candidates. Each candidate must include market_id, question,
+market_prob, and ai_prob. If nothing qualifies, return an empty candidates list.
 """
 
 
 def _parse_candidates(content: str) -> List[dict]:
-    """Extract a JSON array from the LLM response, tolerating wrappers."""
+    """Extract a JSON array from the LLM response, tolerating wrappers (fallback)."""
     content = (content or "").strip()
     try:
         result = json.loads(content)
@@ -66,6 +63,18 @@ def _parse_candidates(content: str) -> List[dict]:
             pass
 
     return []
+
+
+def _structured_to_raw_list(sc: ScannerCandidates) -> List[dict]:
+    return [
+        {
+            "market_id": c.market_id,
+            "question": c.question,
+            "market_prob": c.market_prob,
+            "ai_prob": c.ai_prob,
+        }
+        for c in sc.candidates
+    ]
 
 
 async def scanner_node(state: Dict[str, Any]) -> Dict[str, Any]:
@@ -140,13 +149,12 @@ async def scanner_node(state: Dict[str, Any]) -> Dict[str, Any]:
         )
         market_list.append({
             "id": m.id,
-            "q": m.question[:200],  # truncate very long questions
+            "q": m.question[:200],
             "p": round(m.market_prob, 4),
             "v": int(m.volume),
             "d": days_to_end,
         })
 
-    # Compact JSON, no indent — saves ~30% chars
     market_json = json.dumps(market_list, separators=(",", ":"))
 
     prompt = f"""MARKETS (compact: id,q=question,p=market_prob_YES,v=volume_usd,d=days_to_end):
@@ -155,20 +163,30 @@ async def scanner_node(state: Dict[str, Any]) -> Dict[str, Any]:
 CONTEXT (recent news, may help calibrate):
 {search_context[:1500] if search_context else "(none)"}
 
-Flag markets where |EV| > {min_ev}. Output JSON array only."""
+Flag markets where |EV| > {min_ev}. Return structured candidates only."""
 
-    # ── Step 4: Single structured LLM call ───────────────────────────────────
+    # ── Step 4: Structured LLM call (regex fallback) ─────────────────────────
+    raw_candidates: List[dict] = []
     try:
         llm = get_llm(streaming=False)
         system_prompt = SCANNER_SYSTEM.format(min_ev=min_ev)
 
-        response = await llm.ainvoke([
-            SystemMessage(content=system_prompt),
-            HumanMessage(content=prompt),
-        ])
-
-        content = response.content if hasattr(response, "content") else str(response)
-        raw_candidates = _parse_candidates(content)
+        try:
+            structured_llm = llm.with_structured_output(ScannerCandidates)
+            sc_result: ScannerCandidates = await structured_llm.ainvoke([
+                SystemMessage(content=system_prompt),
+                HumanMessage(content=prompt),
+            ])
+            raw_candidates = _structured_to_raw_list(sc_result)
+            logger.info(f"Scanner structured output: {len(raw_candidates)} raw candidates")
+        except Exception as struct_err:
+            logger.warning(f"Structured scanner failed, using regex fallback: {struct_err}")
+            response = await llm.ainvoke([
+                SystemMessage(content=system_prompt),
+                HumanMessage(content=prompt + "\n\nOutput JSON array only."),
+            ])
+            content = response.content if hasattr(response, "content") else str(response)
+            raw_candidates = _parse_candidates(content)
 
     except Exception as e:
         logger.error(f"Scanner LLM call failed: {e}")
@@ -200,17 +218,30 @@ Flag markets where |EV| > {min_ev}. Output JSON array only."""
                 "ev": round(ev, 4),
                 "confidence": confidence_level(ev, ap, mp),
                 "url": source_market.url,
+                "clob_token_id": source_market.clob_token_id,
             })
         except Exception:
             continue
 
+    arbitrage_signals = []
+    try:
+        from agent.tools.arbitrage import find_internal_price_divergences
+
+        arbitrage_signals = [
+            s.model_dump()
+            for s in find_internal_price_divergences(markets)
+        ][:10]
+    except Exception as e:
+        logger.debug(f"Arbitrage scan skipped: {e}")
+
     logger.info(
-        f"Scanner: {len(markets)} markets → {len(enriched)} candidates (min_ev={min_ev})"
+        f"Scanner: {len(markets)} markets -> {len(enriched)} candidates (min_ev={min_ev})"
     )
 
     return {
         **state,
         "candidates": enriched,
         "markets": [m.id for m in markets],
+        "arbitrage_signals": arbitrage_signals,
         "error": None,
     }

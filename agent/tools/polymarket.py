@@ -13,7 +13,7 @@ TLS handshake / connection-pool setup on every request.
 import asyncio
 import json
 from datetime import datetime, timezone, timedelta
-from typing import List, Optional
+from typing import List, Optional, Tuple
 
 import httpx
 
@@ -133,6 +133,7 @@ async def fetch_markets(
             end_date=end_date,
             url=f"{POLYMARKET_BASE}/{slug}",
             builder_code_url=BUILDER_REF.format(slug=slug),
+            clob_token_id=_parse_clob_token_id(m),
         )
         results.append(market)
 
@@ -149,6 +150,72 @@ async def get_market_history(market_id: str) -> dict:
         return resp.json()
     except Exception as e:
         return {"error": str(e), "market_id": market_id}
+
+
+def _parse_clob_token_id(raw_market: dict) -> Optional[str]:
+    """Extract YES-side CLOB token id from Gamma market payload."""
+    token_ids = raw_market.get("clobTokenIds")
+    if isinstance(token_ids, str):
+        try:
+            token_ids = json.loads(token_ids)
+        except json.JSONDecodeError:
+            return None
+    if isinstance(token_ids, list) and token_ids:
+        return str(token_ids[0])
+    return None
+
+
+def _outcome_from_prices(yes_price: float, no_price: float) -> Optional[str]:
+    """Infer resolved YES/NO from final outcome prices (near 0/1)."""
+    if yes_price >= 0.99:
+        return "yes"
+    if no_price >= 0.99:
+        return "no"
+    if yes_price <= 0.01:
+        return "no"
+    if no_price <= 0.01:
+        return "yes"
+    return None
+
+
+async def fetch_resolved_market(market_id: str) -> Tuple[bool, Optional[str]]:
+    """
+    Check whether a market has resolved and return the winning side.
+
+    Returns:
+        (resolved, outcome) where outcome is "yes", "no", or None if still open/unknown.
+    """
+    data = await get_market_history(market_id)
+    if not isinstance(data, dict) or data.get("error"):
+        return False, None
+
+    closed = bool(data.get("closed")) or bool(data.get("closedTime"))
+    if not closed:
+        return False, None
+
+    raw_prices = data.get("outcomePrices", "[]")
+    if isinstance(raw_prices, str):
+        try:
+            prices = json.loads(raw_prices)
+        except json.JSONDecodeError:
+            return False, None
+    elif isinstance(raw_prices, list):
+        prices = raw_prices
+    else:
+        return False, None
+
+    if len(prices) != 2:
+        return False, None
+
+    try:
+        yes_p, no_p = float(prices[0]), float(prices[1])
+    except (TypeError, ValueError):
+        return False, None
+
+    outcome = _outcome_from_prices(yes_p, no_p)
+    if outcome is None:
+        return False, None
+    return True, outcome
 
 
 async def close_client() -> None:

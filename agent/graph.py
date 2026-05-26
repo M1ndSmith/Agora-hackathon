@@ -4,7 +4,7 @@ LangGraph orchestration — Agora's two-stage agent pipeline.
 Graph:
   scanner_node
       │
-      ├─ candidates found ──► researcher_node ──► executor_node ──► END
+      ├─ candidates found ──► researcher_node ──► portfolio_node ──► executor_node ──► END
       │
       └─ no candidates ──────────────────────────────────────────► END
 
@@ -21,6 +21,7 @@ from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
 from langgraph.graph import END, START, StateGraph
 
 from agent.nodes.executor import executor_node
+from agent.nodes.portfolio import portfolio_node
 from agent.nodes.researcher import researcher_node
 from agent.nodes.scanner import scanner_node
 from config import get_settings
@@ -37,6 +38,13 @@ _ALLOWED_TYPES = (
     ("models", "Pick"),
     ("models", "PolymarketMarket"),
     ("models", "ResearchEstimate"),
+    ("models", "ScannerCandidate"),
+    ("models", "ScannerCandidates"),
+    ("models", "MicrostructureSignal"),
+    ("models", "EnsembleEstimate"),
+    ("models", "OrderTicket"),
+    ("models", "PortfolioRecommendation"),
+    ("models", "RiskAssessment"),
 )
 _AGORA_SERDE = JsonPlusSerializer(allowed_msgpack_modules=_ALLOWED_TYPES)
 
@@ -64,6 +72,7 @@ def build_graph() -> StateGraph:
 
     graph.add_node("scanner", scanner_node)
     graph.add_node("researcher", researcher_node)
+    graph.add_node("portfolio", portfolio_node)
     graph.add_node("executor", executor_node)
 
     graph.set_entry_point("scanner")
@@ -73,7 +82,8 @@ def build_graph() -> StateGraph:
         _route_after_scanner,
         {"researcher": "researcher", END: END},
     )
-    graph.add_edge("researcher", "executor")
+    graph.add_edge("researcher", "portfolio")
+    graph.add_edge("portfolio", "executor")
     graph.add_edge("executor", END)
 
     return graph
@@ -102,6 +112,9 @@ async def run_agent(
             "top_n": top_n or settings.top_n_picks,
         },
         "wallet_balance": 0.0,
+        "portfolio": None,
+        "risk_summary": None,
+        "arbitrage_signals": [],
         "error": None,
     }
 
@@ -137,6 +150,9 @@ async def stream_agent(
             "top_n": top_n or settings.top_n_picks,
         },
         "wallet_balance": 0.0,
+        "portfolio": None,
+        "risk_summary": None,
+        "arbitrage_signals": [],
         "error": None,
     }
 

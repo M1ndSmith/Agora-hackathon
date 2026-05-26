@@ -35,6 +35,9 @@ rich>=13.0
 # ── Utilities ─────────────────────────────────────────────────────────────────
 python-dotenv>=1.0
 
+# ── Tests ─────────────────────────────────────────────────────────────────────
+pytest>=8.0
+
 # ── Circle Programmable Wallets (optional) ────────────────────────────────────
 # Only needed if you run: python main.py circle-init
 # Install with: pip install circle-configurations circle-developer-controlled-wallets circle-web3-sdk-util

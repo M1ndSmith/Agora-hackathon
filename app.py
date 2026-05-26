@@ -129,7 +129,9 @@ st.markdown(
     "Full reasoning traces are unlocked via **x402 micro-payments** (0.01 USDC)."
 )
 
-tab_scan, tab_history = st.tabs(["Scan & Picks", "History"])
+tab_scan, tab_history, tab_leaderboard = st.tabs(
+    ["Scan & Picks", "History", "Leaderboard"]
+)
 
 
 # ─── Helper: render a single pick card ───────────────────────────────────────
@@ -171,6 +173,96 @@ def _render_pick_card(
         col_c.metric("Edge", f"{abs_edge_pp:+.1f}pp")
         col_d.metric("EV", ev_label)
         col_e.metric("Confidence", conf.title())
+
+        # ── Tier 2 intelligence signals ──
+        signals = pdict.get("signals") or {}
+        if isinstance(signals, str):
+            import json as _json
+            try:
+                signals = _json.loads(signals)
+            except Exception:
+                signals = {}
+        signal_parts = []
+        domain = pdict.get("domain") or signals.get("domain")
+        if domain:
+            signal_parts.append(f"Domain: {domain}")
+        if signals.get("top_source"):
+            score = signals.get("top_score", 0)
+            signal_parts.append(
+                f"Top source: {signals['top_source']} ({score:.2f})"
+            )
+        if signals.get("clob_spread") is not None:
+            depth = signals.get("clob_depth_usd", 0)
+            signal_parts.append(
+                f"CLOB spread: {signals['clob_spread']:.3f} | depth: ${depth:,.0f}"
+            )
+        if signals.get("ensemble"):
+            spread = signals.get("ensemble_spread", 0)
+            n_prov = len(signals.get("ensemble_providers") or [])
+            signal_parts.append(f"Ensemble: {n_prov} models, spread {spread:.3f}")
+        if signals.get("prior_updated") and signals.get("prior_ai_prob") is not None:
+            signal_parts.append(
+                f"Prior updated from {signals['prior_ai_prob']:.0%} -> {ai_prob:.0%}"
+            )
+        if signal_parts:
+            st.caption("Signals: " + " | ".join(signal_parts))
+
+        # ── Tier 3 execution (dry-run) ──
+        exec_parts = []
+        execution = pdict.get("execution") or {}
+        if isinstance(execution, str):
+            import json as _json
+            try:
+                execution = _json.loads(execution)
+            except Exception:
+                execution = {}
+
+        try:
+            size_val = float(signals.get("portfolio_size_usdc") or 0)
+        except (TypeError, ValueError):
+            size_val = 0.0
+        if size_val > 0:
+            exec_parts.append(f"Size: ${size_val:.2f} USDC")
+
+        ticket = signals.get("order_ticket")
+        if not isinstance(ticket, dict) and isinstance(execution, dict):
+            ticket = execution.get("order_ticket") or (
+                execution if execution.get("side") else None
+            )
+        if isinstance(ticket, dict) and ticket.get("side"):
+            side = ticket.get("side", "")
+            price = float(ticket.get("limit_price") or 0)
+            tsize = float(ticket.get("size_usdc") or 0)
+            dry = ticket.get("dry_run", True)
+            exec_parts.append(
+                f"Ticket ({'dry-run' if dry else 'live'}): {side} @ {price:.3f} for ${tsize:.2f}"
+            )
+            if not ticket.get("valid", True):
+                exec_parts.append("INVALID ticket")
+
+        warnings = [w for w in (signals.get("risk_warnings") or []) if w]
+        if warnings:
+            exec_parts.append("Risk: " + ", ".join(str(w) for w in warnings))
+
+        hedge = signals.get("hedge") or execution.get("hedge") or {}
+        if isinstance(hedge, dict) and hedge.get("suggested") is True:
+            exec_parts.append(
+                f"Hedge: {hedge.get('hedge_side', '')} ({hedge.get('reason', '')})"
+            )
+
+        early = signals.get("early_close") or execution.get("early_close") or {}
+        if isinstance(early, dict):
+            action = early.get("action")
+            action_str = str(action).strip().lower() if action is not None else ""
+            if action_str and action_str not in ("hold", "none"):
+                reason = (early.get("reason") or "").strip()
+                label = action_str.replace("_", " ")
+                exec_parts.append(
+                    f"Early close: {label}" + (f" — {reason}" if reason else "")
+                )
+
+        if exec_parts:
+            st.caption("Execution: " + " | ".join(exec_parts))
 
         # ── Key Evidence ──
         key_evidence = pdict.get("key_evidence") or []
@@ -353,6 +445,8 @@ with tab_scan:
                     "candidates": candidates,
                     "picks": picks,
                     "wallet_balance": final_state.get("wallet_balance", 0.0),
+                    "risk_summary": final_state.get("risk_summary") or {},
+                    "arbitrage_signals": final_state.get("arbitrage_signals") or [],
                 }
 
                 progress_area.success(
@@ -364,6 +458,33 @@ with tab_scan:
 
         st.session_state.scan_running = False
         st.rerun()
+
+    risk = last.get("risk_summary") or {}
+    if risk:
+        st.subheader("Execution Summary")
+        e1, e2, e3 = st.columns(3)
+        e1.metric("Suggested exposure", f"${risk.get('total_exposure', 0):.2f}")
+        e2.metric("Bankroll", f"${risk.get('bankroll', 0):.2f}")
+        e3.metric("Drawdown pause", "Yes" if risk.get("paused") else "No")
+        capped = 0
+        for p in last.get("picks") or []:
+            pd = p.model_dump() if hasattr(p, "model_dump") else dict(p)
+            sig = pd.get("signals") or {}
+            if sig.get("risk_capped"):
+                capped += 1
+        if capped:
+            st.caption(f"{capped} pick(s) capped by risk limits")
+
+    arb = last.get("arbitrage_signals") or []
+    if arb:
+        with st.expander(f"Arbitrage signals ({len(arb)})", expanded=False):
+            for sig in arb[:5]:
+                st.markdown(
+                    f"- **{sig.get('divergence', 0):.1%}** divergence "
+                    f"(sim={sig.get('similarity', 0):.2f}): "
+                    f"{sig.get('question_a', '')[:50]}... vs "
+                    f"{sig.get('question_b', '')[:50]}..."
+                )
 
     # ── Picks list ──
     picks = last.get("picks", [])
@@ -377,9 +498,87 @@ with tab_scan:
         st.info("Hit **Scan Markets** to start the Agora agent pipeline.")
 
 
+def _render_credibility_dashboard(picks: List[dict], key_prefix: str = "hist"):
+    """Shared metrics row + charts for History and Leaderboard tabs."""
+    from agent.tools.metrics import (
+        brier_score,
+        calibration_bins,
+        calibration_error,
+        cumulative_pnl,
+        hit_rate_by_confidence,
+        realized_pnl,
+        total_stats,
+    )
+
+    stats = total_stats(picks)
+    m1, m2, m3, m4, m5 = st.columns(5)
+    m1.metric("Resolved", stats["resolved_count"])
+    hr = stats["hit_rate"]
+    m2.metric("Hit rate", f"{hr:.1%}" if hr is not None else "—")
+    m3.metric("Total P&L", f"${stats['total_pnl']:.4f}")
+    mb = stats["mean_brier"]
+    m4.metric("Mean Brier", f"{mb:.4f}" if mb is not None else "—")
+    m5.metric("ECE", f"{stats['ece']:.4f}")
+
+    resolved = [p for p in picks if p.get("resolved") and p.get("outcome") in ("yes", "no")]
+    if resolved:
+        pnl_series = cumulative_pnl(picks)
+        if pnl_series:
+            st.line_chart(
+                {d.isoformat() if hasattr(d, "isoformat") else str(d): v for d, v in pnl_series},
+                x_label="Pick time",
+                y_label="Cumulative P&L (USDC)",
+            )
+
+        bins = calibration_bins(resolved)
+        if bins:
+            cal_df = {
+                "Predicted": [b["prob_mean"] for b in bins],
+                "Actual YES rate": [b["actual_yes_rate"] for b in bins],
+            }
+            st.caption(f"Calibration (ECE={calibration_error(bins):.4f}) — closer to diagonal is better")
+            st.bar_chart(cal_df)
+
+        conf_stats = hit_rate_by_confidence(picks)
+        conf_rows = []
+        for tier in ("low", "medium", "high"):
+            c = conf_stats[tier]
+            rate = c["rate"]
+            conf_rows.append(
+                {
+                    "Confidence": tier.title(),
+                    "Hits": c["hits"],
+                    "Total": c["total"],
+                    "Hit rate": f"{rate:.1%}" if rate is not None else "—",
+                }
+            )
+        st.caption("Hit rate by confidence tier")
+        hit_chart = {
+            t.title(): (conf_stats[t]["rate"] or 0.0)
+            for t in ("low", "medium", "high")
+            if conf_stats[t]["total"]
+        }
+        if hit_chart:
+            st.bar_chart(hit_chart)
+
+
 # ─── Tab 2: History ───────────────────────────────────────────────────────────
 with tab_history:
     st.subheader("Pick History")
+
+    col_refresh, _ = st.columns([1, 4])
+    with col_refresh:
+        if st.button("Refresh resolutions", key="refresh_resolutions"):
+            from agent.tools.outcomes import resolve_open_picks
+
+            with st.spinner("Polling Polymarket for resolved markets..."):
+                summary = _run_async(resolve_open_picks())
+            st.success(
+                f"Checked {summary['checked']} — "
+                f"{summary['newly_resolved']} newly resolved, "
+                f"{summary['still_open']} still open"
+            )
+            st.rerun()
 
     try:
         history = _run_async(store.get_pick_history())
@@ -390,11 +589,15 @@ with tab_history:
         st.info("No picks yet. Run a scan to populate history.")
     else:
         st.caption(f"{len(history)} total picks logged")
+        _render_credibility_dashboard(history, key_prefix="history")
 
-        # Summary table
+        from agent.tools.metrics import brier_score, realized_pnl
+
         table_data = []
         for row in history:
             ev_pct = (row.get("ev") or 0) * 100
+            pnl = realized_pnl(row)
+            brier = brier_score(row)
             table_data.append(
                 {
                     "Question": (row.get("question") or "")[:65] + "...",
@@ -403,6 +606,8 @@ with tab_history:
                     "EV": f"{ev_pct:+.1f}%",
                     "Confidence": (row.get("confidence") or "").title(),
                     "Outcome": row.get("outcome") or "Pending",
+                    "P&L": f"${pnl:.4f}" if pnl is not None else "—",
+                    "Brier": f"{brier:.4f}" if brier is not None else "—",
                     "Unlocked": "Yes" if row.get("x402_receipt") else "No",
                     "Arc TX": (row.get("arc_tx_hash") or "—")[:12] + "..."
                     if row.get("arc_tx_hash") else "—",
@@ -414,6 +619,62 @@ with tab_history:
         st.subheader("Detail View")
         for i, row in enumerate(history[:10]):
             _render_pick_card(row, i, pick_db_id=row.get("id"), key_prefix="history")
+
+
+# ─── Tab 3: Leaderboard ───────────────────────────────────────────────────────
+with tab_leaderboard:
+    st.subheader("Public Leaderboard")
+    st.caption("Resolved picks with verifiable onchain proof and track-record metrics.")
+
+    lb_conf = st.selectbox(
+        "Filter by confidence",
+        ["All", "High", "Medium", "Low"],
+        key="lb_confidence_filter",
+    )
+
+    try:
+        all_picks = _run_async(store.get_pick_history())
+    except Exception:
+        all_picks = []
+
+    resolved_picks = [
+        p for p in all_picks
+        if p.get("resolved") and p.get("outcome") in ("yes", "no")
+    ]
+    if lb_conf != "All":
+        resolved_picks = [
+            p for p in resolved_picks
+            if (p.get("confidence") or "").lower() == lb_conf.lower()
+        ]
+
+    if not resolved_picks:
+        st.info("No resolved picks yet. Run scans and use Refresh resolutions in History.")
+    else:
+        _render_credibility_dashboard(resolved_picks, key_prefix="leaderboard")
+
+        from agent.tools.metrics import brier_score, realized_pnl
+
+        lb_rows = []
+        for row in resolved_picks:
+            pnl = realized_pnl(row)
+            brier = brier_score(row)
+            explorer = row.get("arc_explorer_url") or ""
+            tx = row.get("arc_tx_hash") or ""
+            proof = explorer if explorer else (tx[:16] + "..." if tx else "—")
+            lb_rows.append(
+                {
+                    "Question": row.get("question") or "",
+                    "Created": (row.get("created_at") or "")[:19],
+                    "Market %": f"{(row.get('market_prob') or 0):.1%}",
+                    "AI %": f"{(row.get('ai_prob') or 0):.1%}",
+                    "Outcome": (row.get("outcome") or "").upper(),
+                    "P&L (USDC)": round(pnl, 4) if pnl is not None else None,
+                    "Brier": round(brier, 4) if brier is not None else None,
+                    "Confidence": (row.get("confidence") or "").title(),
+                    "Arc proof": proof,
+                }
+            )
+        st.dataframe(lb_rows, width="stretch", hide_index=True)
 
 
 # ─── Auto-refresh ─────────────────────────────────────────────────────────────

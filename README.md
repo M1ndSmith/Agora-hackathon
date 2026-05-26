@@ -34,6 +34,8 @@ LangGraph Orchestrator
         |    Gate 2: min abs edge       One structured LLM call
         |    Gate 3: logit distance     ResearchEstimate output
         |         |
+        |--[portfolio_node]------------ Risk caps + dry-run CLOB tickets
+        |         |
         `--[executor_node]------------- SQLite (agora.db)
              Plain async function       Arc testnet proof tx
                                         0.01 USDC self-transfer
@@ -46,6 +48,7 @@ LangGraph Orchestrator
 | ---------- | ---------------------------------- | -------------------------------------- | ------------------------- |
 | Scanner    | Deterministic pipeline             | Broad market scan, Gate 1, EV filter   | `candidates[]`            |
 | Researcher | Deterministic pipeline, concurrent | Deep research per candidate, Gates 2+3 | `picks[]` with full trace |
+| Portfolio  | Deterministic risk + sizing        | Risk caps, slippage cap, dry-run tickets | `portfolio[]`, `risk_summary` |
 | Executor   | Plain async function               | Persist + Arc proof tx                 | SQLite row + tx hash      |
 
 
@@ -58,6 +61,43 @@ LangGraph Orchestrator
 | 2    | Researcher | Drop if abs(ai_prob - market_prob) < 5pp | Prevents tiny denominators inflating EV           |
 | 3    | Researcher | Drop if logit_distance > 2.5             | Rejects implausible AI estimates (12x odds ratio) |
 
+
+### Tier 2 intelligence (shipped)
+
+| Feature | What it does | Default |
+| ------- | ------------ | ------- |
+| Source credibility | Tavily snippets ranked by outlet tier + recency | On |
+| CLOB microstructure | Bid/ask spread and depth from Polymarket order book | On (`CLOB_ENABLED=true`) |
+| Domain prompts | Politics / sports / crypto / science estimation templates | On |
+| Bayesian prior | Re-scan injects last unresolved `ai_prob` for same market | On |
+| LLM ensemble | Median across groq + nvidia + openai when all keys set | Off (`ENSEMBLE_ENABLED=false`) |
+| Scanner structured output | `ScannerCandidates` Pydantic schema (regex fallback) | On |
+
+### Tier 3 execution (dry-run, shipped)
+
+| Feature | What it does | Default |
+| ------- | ------------ | ------- |
+| Portfolio node | Risk caps + theme exposure + slippage-aware sizing | On |
+| Dry-run CLOB tickets | `BUY_YES` / `BUY_NO` limit orders (not submitted) | On |
+| Hedge / early-close | Advisory when price moves for/against position | On |
+| Arbitrage scan | Internal Polymarket question similarity + price divergence | On |
+
+Pipeline: `scanner -> researcher -> portfolio -> executor`. CLI: `python main.py portfolio`, `orders --dry-run`, `arbitrage`.
+
+Each pick card shows a **Signals** line: domain, top source score, CLOB spread/depth, ensemble spread (if enabled), prior update (on re-scan).
+
+The Scan tab also shows an **Execution Summary** (bankroll, suggested exposure, drawdown pause) and per-pick **Execution** lines (size, dry-run ticket, risk cap reason). Empty hedge/early-close advisories are hidden so only actionable lines appear.
+
+Optional env flags:
+
+```bash
+ENSEMBLE_ENABLED=true
+ENSEMBLE_DISAGREEMENT_THRESHOLD=0.15
+DOMAIN_ROUTING_ENABLED=true
+CLOB_ENABLED=true
+SOCIAL_ENABLED=false
+TWITTER_BEARER_TOKEN=
+```
 
 ---
 
@@ -124,6 +164,29 @@ streamlit run app.py
 python main.py scan
 python main.py picks --top 10
 python main.py wallet
+python main.py resolve
+python main.py metrics
+python main.py portfolio
+python main.py orders --dry-run
+python main.py arbitrage
+```
+
+### Tests
+
+```bash
+pip install -r requirements.txt
+# If pytest fails due to ROS plugins on your machine:
+./scripts/run_tests.sh
+# Or:
+PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 .venv/bin/python -m pytest -q tests/
+```
+
+Unit tests cover EV math (including two-sided Kelly), Tier 1 metrics, Tier 2 modules (credibility, CLOB, domain, ensemble, prior, scanner), Tier 3 modules (risk, orders, arbitrage, portfolio node), Polymarket parsers, and onchain helpers (no live LLM or HTTP).
+
+With coverage:
+
+```bash
+PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 .venv/bin/python -m pytest -q tests/ --cov=agent --cov=onchain --cov-report=term-missing
 ```
 
 ### 5. Circle setup (optional)
@@ -141,12 +204,25 @@ python main.py circle-init
 EV = (ai_prob - market_prob) / market_prob
 ```
 
-Position sizing uses a conservative quarter-Kelly criterion:
+Position sizing uses a conservative quarter-Kelly criterion on both sides (`kelly_fraction_two_sided` in `agent/tools/ev.py`):
 
 ```
-kelly = (b * p - q) / b   where b = (1 / market_prob) - 1
-position = kelly x bankroll x 0.25
+# YES-side edge (bet YES)
+kelly = (b * p - q) / b   where b = (1 / market_prob) - 1, p = ai_prob, q = 1 - p
+
+# NO-side edge (bet NO) — mirrors probabilities before the same formula
+kelly_no = kelly with p' = 1 - ai_prob, market' = 1 - market_prob
+
+raw_position = kelly * bankroll * 0.25
 ```
+
+The **portfolio node** applies risk caps first (per-market, total exposure, theme), then caps size by CLOB depth:
+
+```
+position = min(risk_capped_size, depth_at_price * SLIPPAGE_DEPTH_FRACTION)
+```
+
+No real orders are submitted (`EXECUTION_DRY_RUN=true`); validated tickets are advisory only.
 
 ---
 
@@ -175,36 +251,50 @@ No smart contract required — verification reads standard ERC-20 logs directly.
 
 ```
 agora-hackathon/
-|-- app.py                  Streamlit UI
+|-- app.py                  Streamlit UI (Scan, History, Leaderboard)
 |-- main.py                 Typer CLI
 |-- config.py               Pydantic settings + LLM provider selection
-|-- models.py               Pydantic schemas (Market, Pick, ResearchEstimate)
+|-- models.py               Pydantic schemas (Pick, ResearchEstimate, Tier 3 models)
 |-- requirements.txt
 |-- .env.example
 |-- demo.mp4                Full walkthrough video
+|-- CODEBASE_GUIDE.md       Developer map of the repo
+|-- PREREQUISITES.md        Setup checklist
+|-- FUTURE_IMPROVEMENTS.md  Roadmap beyond hackathon
 |
 |-- agent/
-|   |-- graph.py            LangGraph StateGraph + custom msgpack serializer
+|   |-- graph.py            LangGraph: scanner -> researcher -> portfolio -> executor
 |   |-- nodes/
-|   |   |-- scanner.py      Stage 1: deterministic pipeline, Gate 1
-|   |   |-- researcher.py   Stage 2: concurrent research, Gates 2+3
-|   |   `-- executor.py     Stage 3: persist + Arc proof tx
+|   |   |-- scanner.py      Stage 1: Gate 1, structured shortlist, arbitrage hints
+|   |   |-- researcher.py   Stage 2: evidence + estimate + Gates 2+3
+|   |   |-- portfolio.py    Stage 3: risk caps, slippage sizing, dry-run tickets
+|   |   `-- executor.py     Stage 4: SQLite + Arc proof tx
 |   `-- tools/
-|       |-- polymarket.py   Gamma API client, shared httpx client
-|       |-- ev.py           EV, Kelly, logit_distance math
-|       `-- search.py       Tavily wrapper + search_compact()
+|       |-- polymarket.py   Gamma API client
+|       |-- ev.py           EV, Kelly (two-sided), slippage-aware sizing
+|       |-- search.py       Tavily + search_weighted() credibility ranking
+|       |-- credibility.py  Outlet tier + recency scoring
+|       |-- clob.py         Polymarket CLOB microstructure
+|       |-- domain.py       Domain classification + prompts
+|       |-- prior.py        Bayesian prior from last unresolved pick
+|       |-- ensemble.py     Multi-LLM median (opt-in)
+|       |-- social.py       Social sentiment stub
+|       |-- outcomes.py     Resolved market polling
+|       |-- metrics.py      P&L, Brier, calibration
+|       |-- risk.py         Exposure caps, hedge/early-close advisories
+|       |-- orders.py       Dry-run CLOB ticket build + validate
+|       `-- arbitrage.py    Internal price-divergence scanner
 |
 |-- onchain/
 |   |-- wallet.py           Arc USDC balance + web3 proof transactions
 |   |-- x402.py             Payment verification via eth_getLogs
-|   |-- circle_wallet.py    Circle REST client (wallet creation + balance)
+|   |-- circle_wallet.py    Circle REST client (optional)
 |   `-- circle_setup/       One-time Circle setup scripts
-|       |-- register_secret.py
-|       |-- create_wallet.py
-|       `-- README.md
 |
-`-- db/
-    `-- store.py            aiosqlite CRUD for picks + markets
+|-- db/
+|   `-- store.py            aiosqlite CRUD (picks, signals, portfolio, execution JSON)
+|
+`-- tests/                  Unit tests (no live LLM or HTTP)
 ```
 
 ---
